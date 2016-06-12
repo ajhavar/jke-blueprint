@@ -1,0 +1,287 @@
+heat_template_version: 2013-05-23
+
+description: 'JKE Banking Application'
+
+parameters:
+  flavor:
+    type: string
+    description: 'Flavor to be used for compute instance'
+  key_name:
+    type: string
+    description: 'For most clouds, the name of the key-pair to be used for the compute instance; for VMware clouds, the contents of the public SSH key for the compute instance'
+  availability_zone:
+    type: string
+    description: 'Name of availability zone in which to create the instance'
+    default: 'nova'
+  ucd_server_url:
+    type: string
+    description: 'The server URL for agent communication to UrbanCode Deploy. Do *not* add a trailing slash.'
+    default: 'http://192.168.27.100:8080'
+  ucd_user:
+    type: string
+    description: 'The user credential for the UrbanCode Deploy server.'
+    default: 'PasswordIsAuthToken'
+  ucd_password:
+    type: string
+    description: 'The user credential for the UrbanCode Deploy server.'
+    hidden: true
+  ucd_relay_url:
+    type: string
+    description: 'The server URL for an agent relay - leave as ''None'' to enable agents to communicate with server directly.'
+    default: 'None'
+  public_network_id:
+    type: string
+    label: 'Public Network'
+    description: 'Generated for floating IP'
+    default: 'public_network_id'
+  private_network_id:
+    type: string
+    label: 'Private Network'
+    description: 'Generated to reference ''private'' network.'
+    default: 'private_network_id'
+  db-srv-image:
+    type: string
+    description: 'OS Image for the Database Server'
+    label: Database Server Image
+    default: 
+  web-srv-image:
+    type: string
+    description: 'OS Image for the web server'
+    label: Web Server Image
+    default: 
+  db-srv-sec-grp:
+    type: string
+    description: 
+    label: Database Server Security Group
+    default: 
+  web-srv-sec-grp:
+    type: string
+    description: 
+    label: Web Server Security Group
+    default:
+
+parameter_groups:
+    - { label: 'Agent Parameters', parameters: [ucd_password, ucd_relay_url, ucd_server_url, ucd_user] }
+    - { label: 'Image Parameters', parameters: [db-srv-sec-grp, flavor, key_name, web-srv-image, web-srv-sec-grp, db-srv-image] }
+    - { label: 'Network Parameters', parameters: [availability_zone, private_network_id, public_network_id] }
+resources:
+
+  db-srv:
+    type: OS::Nova::Server
+    properties:
+      user_data: {get_resource: db-srv_mime }
+      user_data_format: RAW
+      networks:
+          - port: { get_resource: db-srv__to__private_network_id__port  }
+      name: db-srv
+      image: { get_param: db-srv-image } # ubuntu-14.04-amd64
+      flavor: { get_param: flavor }
+      key_name: { get_param: key_name }
+      availability_zone: { get_param: availability_zone }
+      metadata: 
+        "__os_type__" : "Linux"
+
+
+  db-srv__to__private_network_id__port:
+    type: OS::Neutron::Port
+    properties:
+      security_groups:
+        - { get_param: db-srv-sec-grp }
+      network_id: { get_param: private_network_id }
+      replacement_policy: AUTO   #TODO remove this if using HEAT version Icehouse!
+
+  jke_db:
+    depends_on: [MySQL_Server, WebSphere_Liberty_Profile]
+    type: IBM::UrbanCode::SoftwareDeploy::UCD
+    properties:
+      apply_config: { get_resource: jke_db_sw_config }
+      server: db-srv
+      version: LATEST
+      agent_timeout: "360"
+
+  jke_db_sw_config:
+    type: IBM::UrbanCode::SoftwareConfig::UCD
+    properties: 
+      name: "jke.db"
+      component_process: "deploy"
+      component_process_timeout: "300"
+      ucd_server_url: { get_param: ucd_server_url } # these should come from resource_tree
+      ucd_username: { get_param: ucd_user }
+      ucd_password: { get_param: ucd_password }
+      application: { get_attr: [resource_tree, application_name] }
+      environment_name: { get_attr: [resource_tree, environment_name] }
+      inputs:     # component's environment property definitions
+        mysql.bin.dir : "/usr/bin"
+
+  db-srv_mime:
+    type: OS::Heat::MultipartMime
+    properties:
+      parts:
+        - config: { get_resource: ucd_agent_install_linux }
+          subtype: "x-shellscript"
+
+  MySQL_Server:
+    type: IBM::UrbanCode::SoftwareDeploy::UCD
+    properties:
+      apply_config: { get_resource: MySQL_Server_sw_config }
+      server: db-srv
+      version: LATEST
+      agent_timeout: "360"
+
+  MySQL_Server_sw_config:
+    type: IBM::UrbanCode::SoftwareConfig::UCD
+    properties: 
+      name: "MySQL Server"
+      component_process: deploy
+      component_process_timeout: "300"
+      ucd_server_url: { get_param: ucd_server_url } # these should come from resource_tree
+      ucd_username: { get_param: ucd_user }
+      ucd_password: { get_param: ucd_password }
+      application: { get_attr: [resource_tree, application_name] }
+      environment_name: { get_attr: [resource_tree, environment_name] }
+
+  web-srv:
+    type: OS::Nova::Server
+    properties:
+      user_data: {get_resource: web-srv_mime }
+      user_data_format: RAW
+      networks:
+          - port: { get_resource: web-srv__to__private_network_id__port  }
+      name: web-srv
+      image: { get_param: web-srv-image }  # ubuntu-14.04-amd64
+      flavor: { get_param: flavor }
+      key_name: { get_param: key_name }
+      availability_zone: { get_param: availability_zone }
+      metadata: 
+        "__os_type__" : "Linux"
+
+  web-srv__to__private_network_id__port:
+    type: OS::Neutron::Port
+    properties:
+      security_groups:
+        - { get_param: web-srv-sec-grp }
+      network_id: { get_param: private_network_id }
+      replacement_policy: AUTO   #TODO remove this if using HEAT version Icehouse!
+
+  web-srv__to__private__floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network_id: { get_param: public_network_id }
+      port_id: {get_resource: web-srv__to__private_network_id__port }
+
+  jke_war:
+    depends_on: jke_db
+    type: IBM::UrbanCode::SoftwareDeploy::UCD
+    properties:
+      apply_config: { get_resource: jke_war_sw_config }
+      server: web-srv
+      version: LATEST
+      agent_timeout: "360"
+
+  jke_war_sw_config:
+    type: IBM::UrbanCode::SoftwareConfig::UCD
+    properties: 
+      name: "jke.war"
+      component_process: "deploy"
+      component_process_timeout: "300"
+      ucd_server_url: { get_param: ucd_server_url } # these should come from resource_tree
+      ucd_username: { get_param: ucd_user }
+      ucd_password: { get_param: ucd_password }
+      application: { get_attr: [resource_tree, application_name] }
+      environment_name: { get_attr: [resource_tree, environment_name] }
+      inputs:     # component's environment property definitions
+        jke.db.host: { get_attr: [db-srv, networks, private, 0] }  # Private IP address for 'db-srv'
+        liberty.install.dir : "/opt/was/liberty"
+
+  web-srv_mime:
+    type: OS::Heat::MultipartMime
+    properties:
+      parts:
+        - config: { get_resource: ucd_agent_install_linux }
+          subtype: "x-shellscript"
+
+  WebSphere_Liberty_Profile:
+    type: IBM::UrbanCode::SoftwareDeploy::UCD
+    properties:
+      apply_config: { get_resource: WebSphere_Liberty_Profile_sw_config }
+      server: web-srv
+      version: LATEST
+      agent_timeout: "360"
+
+  WebSphere_Liberty_Profile_sw_config:
+    type: IBM::UrbanCode::SoftwareConfig::UCD
+    properties: 
+      name: "WebSphere Liberty Profile"
+      component_process: deploy
+      component_process_timeout: "300"
+      ucd_server_url: { get_param: ucd_server_url } # these should come from resource_tree
+      ucd_username: { get_param: ucd_user }
+      ucd_password: { get_param: ucd_password }
+      application: { get_attr: [resource_tree, application_name] }
+      environment_name: { get_attr: [resource_tree, environment_name] }
+      inputs:     # component's environment property definitions
+        liberty.install.dir : "/opt/was/liberty"
+
+  resource_tree:
+    type: IBM::UrbanCode::ResourceTree
+    properties:
+       urbancode_deploy_url: { get_param: ucd_server_url }
+       username: { get_param: ucd_user }
+       password: { get_param: ucd_password }
+       team_mappings: 
+       application: JKE
+       base_resource_group: 
+
+  ucd_agent_install_linux:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      config:
+        str_replace:
+          template: |
+            #!/usr/bin/env bash
+            ifconfig eth0 mtu 1500 ## Optionally patch the MTU
+            arch=`uname -ms | awk '{print tolower($0)}' | tr " " "-" `
+            agent_archive=ibm-ucd-agent-$arch.tgz
+            if [ "_ucd_relay_url_" != "None" ]; then
+              proxy_args="--proxy _ucd_relay_url_:20080"
+              ucd_remote_host=_ucd_relay_url_
+              agent_args="-r -d"
+            else
+              proxy_args=
+              agent_args=
+              ucd_remote_host=_ucd_server_url_
+            fi
+            if command -V apt-get && ! command -V curl; then apt-get -y install curl; fi
+            if command -V yum && ! command -V curl; then yum -y install curl; fi
+            curl $proxy_args -Lk --retry 10 --retry-delay 10 --retry-max-time 120 -o /tmp/$agent_archive -u _ucd_user_:_ucd_password_ "_ucd_server_url_/cli/version/downloadArtifacts?component=ucd-agent-$arch&version=_agent_version_&singleFilePath=$agent_archive"
+            tar xfz /tmp/$agent_archive -C /tmp
+            /tmp/ibm-ucd-agent-install/install-agent-with-options.sh -t "_agent_team_" -s $ucd_remote_host $agent_args -x start -v -n _agent_name_
+          params:
+            _agent_name_:
+               str_replace:
+                  template: |
+                    "_application_name_._environment_name_"
+                  params:
+                    _application_name_: { get_attr: [resource_tree, application_name ] }
+                    _environment_name_: { get_param: "OS::stack_name" }
+            _ucd_server_url_: { get_param: ucd_server_url }
+            _ucd_relay_url_: { get_param: ucd_relay_url }
+            _ucd_user_ : { get_param: ucd_user }
+            _ucd_password_ : { get_param: ucd_password }
+            _agent_version_ : 7.1
+            _agent_team_ : ""
+
+outputs:
+  blueprint_url:
+    description: Blueprint Origin URL
+    value:  http://192.168.27.100:9080/landscaper/view/projects?open=demo_53d35df0_a04c_4856_9768_fb9beb1f92a6-OrionContent/demo/jke/jke.yml
+
+  application_url:
+    description: JKE Banking URL
+    value:
+      str_replace:
+        template: |
+          http://__ip_address__:9080/
+        params:
+          __ip_address__: { get_attr: [web-srv__to__private__floating_ip, floating_ip_address] }
+
