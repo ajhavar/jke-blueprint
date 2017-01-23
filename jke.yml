@@ -49,20 +49,10 @@ parameters:
     description: 'OS Image for the web server'
     label: Web Server Image
     default: 
-  db-srv-sec-grp:
-    type: string
-    description: 
-    label: Database Server Security Group
-    default: 
-  web-srv-sec-grp:
-    type: string
-    description: 
-    label: Web Server Security Group
-    default:
 
 parameter_groups:
     - { label: 'Agent Parameters', parameters: [ucd_password, ucd_relay_url, ucd_server_url, ucd_user] }
-    - { label: 'Image Parameters', parameters: [db-srv-sec-grp, flavor, key_name, web-srv-image, web-srv-sec-grp, db-srv-image] }
+    - { label: 'Image Parameters', parameters: [flavor, key_name, web-srv-image, db-srv-image] }
     - { label: 'Network Parameters', parameters: [availability_zone, private_network_id, public_network_id] }
 resources:
 
@@ -86,7 +76,7 @@ resources:
     type: OS::Neutron::Port
     properties:
       security_groups:
-        - { get_param: db-srv-sec-grp }
+        - { get_resource: mysql-sg }
       network_id: { get_param: private_network_id }
       replacement_policy: AUTO   #TODO remove this if using HEAT version Icehouse!
 
@@ -159,7 +149,7 @@ resources:
     type: OS::Neutron::Port
     properties:
       security_groups:
-        - { get_param: web-srv-sec-grp }
+        - { get_resource: was-liberty-sg }
       network_id: { get_param: private_network_id }
       replacement_policy: AUTO   #TODO remove this if using HEAT version Icehouse!
 
@@ -232,6 +222,42 @@ resources:
        application: JKE
        base_resource_group: 
 
+  was-liberty-sg:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name: JKE Web Server Security Group
+      rules:
+        - direction: ingress
+          port_range_min: 22
+          port_range_max: 22
+          protocol: tcp
+          ethertype: IPv4
+          remote_ip_prefix: 0.0.0.0/0
+        - direction: ingress
+          port_range_min: 9080
+          port_range_max: 9080
+          protocol: tcp
+          ethertype: IPv4
+          remote_ip_prefix: 0.0.0.0/0
+
+  mysql-sg:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name: JKE DB Security Group
+      rules:
+        - direction: ingress
+          port_range_min: 22
+          port_range_max: 22
+          protocol: tcp
+          ethertype: IPv4
+          remote_ip_prefix: 0.0.0.0/0
+        - direction: ingress
+          port_range_min: 3306
+          port_range_max: 3306
+          protocol: tcp
+          ethertype: IPv4
+          remote_ip_prefix: 0.0.0.0/0
+
   ucd_agent_install_linux:
     type: OS::Heat::SoftwareConfig
     properties:
@@ -239,7 +265,8 @@ resources:
         str_replace:
           template: |
             #!/usr/bin/env bash
-            ifconfig eth0 mtu 1500 ## Optionally patch the MTU
+            #ifconfig eth0 mtu 1454 ## Optionally patch the MTU
+            export PATH=$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/root/bin
             arch=`uname -ms | awk '{print tolower($0)}' | tr " " "-" `
             agent_archive=ibm-ucd-agent-$arch.tgz
             if [ "_ucd_relay_url_" != "None" ]; then
